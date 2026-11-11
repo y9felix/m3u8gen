@@ -228,21 +228,17 @@ getv1(FILE *f, struct tag *tp)
 		return;
 	if (fread(v1, 1, sizeof(v1), f) != sizeof(v1) || memcmp(v1, "TAG", 3))
 		return;
-	if (!tp->title[0]) {
-		decodelatin1(tp->title, sizeof(tp->title), v1 + 3, 30);
-		trim(tp->title);
-	}
-	if (!tp->artist[0]) {
-		decodelatin1(tp->artist, sizeof(tp->artist), v1 + 33, 30);
-		trim(tp->artist);
-	}
+	if (!tp->title[0])
+		decodetag(tp->title, sizeof(tp->title), v1 + 3, 30, ENC_LATIN1);
+	if (!tp->artist[0])
+		decodetag(tp->artist, sizeof(tp->artist), v1 + 33, 30, ENC_LATIN1);
 }
 
 static void
 getv2(FILE *f, struct tag *tp)
 {
 	char *dst;
-	size_t dlen, pos, readsz, sz, tagsz;
+	size_t pos, readsz, sz, tagsz;
 	int ver;
 	unsigned char buf[TAGSZ], h[10];
 
@@ -256,15 +252,19 @@ getv2(FILE *f, struct tag *tp)
 	if ((h[5] & 0x40) && tagsz >= 4) {
 		if (fread(buf, 1, 4, f) != 4)
 			return;
-		sz = (ver == 4) ? syncsz(buf) : be32(buf);
-		if (ver == 4 && sz > 4) {
-			if (fseek(f, (long)(sz - 4), SEEK_CUR) < 0)
+		if (ver == 4) {
+			sz = syncsz(buf);
+			if (sz < 4 || sz > tagsz ||
+			    fseek(f, (long)(sz - 4), SEEK_CUR) < 0)
 				return;
-		} else if (ver == 3) {
-			if (fseek(f, (long)sz, SEEK_CUR) < 0)
+			pos = sz;
+		} else {
+			sz = be32(buf);
+			if (sz > tagsz - 4 ||
+			    fseek(f, (long)sz, SEEK_CUR) < 0)
 				return;
+			pos = sz + 4;
 		}
-		pos = (ver == 4) ? sz : sz + 4;
 	}
 	while (pos + 10 <= tagsz && (!tp->title[0] || !tp->artist[0])) {
 		if (fread(buf, 1, 10, f) != 10)
@@ -276,20 +276,16 @@ getv2(FILE *f, struct tag *tp)
 		if (sz > tagsz - pos)
 			break;
 		dst = NULL;
-		dlen = 0;
-		if (!tp->title[0] && !memcmp(buf, "TIT2", 4)) {
+		if (!tp->title[0] && !memcmp(buf, "TIT2", 4))
 			dst = tp->title;
-			dlen = sizeof(tp->title);
-		} else if (!tp->artist[0] && !memcmp(buf, "TPE1", 4)) {
+		else if (!tp->artist[0] && !memcmp(buf, "TPE1", 4))
 			dst = tp->artist;
-			dlen = sizeof(tp->artist);
-		}
 		readsz = 0;
 		if (dst && sz > 1) {
 			readsz = sz < sizeof(buf) ? sz : sizeof(buf);
 			if (fread(buf, 1, readsz, f) == readsz)
-				decodetag(dst, dlen, buf + 1, readsz - 1,
-				    buf[0]);
+				decodetag(dst, sizeof(tp->title), buf + 1,
+				    readsz - 1, buf[0]);
 		}
 		if (sz > readsz &&
 		    fseek(f, (long)(sz - readsz), SEEK_CUR) < 0)
@@ -330,9 +326,8 @@ processfile(const char *path)
 			blen = (size_t)(dot - base);
 		else
 			blen = strlen(base);
-		decodeutf8(tag.title, sizeof(tag.title),
-		    (const unsigned char *)base, blen);
-		trim(tag.title);
+		decodetag(tag.title, sizeof(tag.title),
+		    (const unsigned char *)base, blen, ENC_UTF8);
 	}
 	if (tag.artist[0])
 		printf("#EXTINF:-1,%s - %s\n%s\n", tag.artist, tag.title, path);
@@ -361,7 +356,7 @@ processstream(FILE *fp)
 	}
 	free(line);
 	if (ferror(fp)) {
-		warn("getline");
+		warn("stdin");
 		ret = -1;
 	}
 	return ret;
@@ -370,17 +365,17 @@ processstream(FILE *fp)
 int
 main(int argc, char *argv[])
 {
-	int ch, ret;
+	int ret;
 
 	opterr = 0;
-	while ((ch = getopt(argc, argv, "")) != -1)
+	while (getopt(argc, argv, "") != -1)
 		usage();
 	argc -= optind;
 	argv += optind;
 	puts("#EXTM3U");
-	if (!argc)
-		return (processstream(stdin) < 0 || ferror(stdout)) ? 1 : 0;
 	ret = 0;
+	if (!argc && processstream(stdin) < 0)
+		ret = 1;
 	for (; argc > 0; argv++, argc--) {
 		if (!strcmp(*argv, "-")) {
 			if (processstream(stdin) < 0)
