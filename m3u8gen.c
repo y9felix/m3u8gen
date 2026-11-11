@@ -24,14 +24,10 @@ struct tag {
 static void usage(void);
 static void trim(char *s);
 static size_t pututf8(char *dst, size_t dlen, size_t di, unsigned int cp);
-static void decodelatin1(char *dst, size_t dlen, const unsigned char *src,
-    size_t slen);
-static void decodeutf8(char *dst, size_t dlen, const unsigned char *src,
-    size_t slen);
-static void decodeutf16(char *dst, size_t dlen, const unsigned char *src,
-    size_t slen, int enc);
-static void decodetag(char *dst, size_t dlen, const unsigned char *src,
-    size_t slen, int enc);
+static void decodelatin1(char *dst, size_t dlen, const unsigned char *src, size_t slen);
+static void decodeutf8(char *dst, size_t dlen, const unsigned char *src, size_t slen);
+static void decodeutf16(char *dst, size_t dlen, const unsigned char *src, size_t slen, int enc);
+static void decodetag(char *dst, size_t dlen, const unsigned char *src, size_t slen, int enc);
 static int validid(const unsigned char *p);
 static size_t be32(const unsigned char *p);
 static size_t syncsz(const unsigned char *p);
@@ -44,8 +40,7 @@ static int processstream(FILE *fp);
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [file ...]\n",
-	    program_invocation_short_name);
+	fprintf(stderr, "usage: %s [file ...]\n", program_invocation_short_name);
 	exit(1);
 }
 
@@ -129,8 +124,7 @@ decodeutf8(char *dst, size_t dlen, const unsigned char *src, size_t slen)
 }
 
 static void
-decodeutf16(char *dst, size_t dlen, const unsigned char *src, size_t slen,
-    int enc)
+decodeutf16(char *dst, size_t dlen, const unsigned char *src, size_t slen, int enc)
 {
 	size_t di, si;
 	unsigned int u, u2;
@@ -149,16 +143,13 @@ decodeutf16(char *dst, size_t dlen, const unsigned char *src, size_t slen,
 		}
 	}
 	for (; si + 1 < slen; si += 2) {
-		u = be ? ((src[si] << 8) | src[si + 1]) :
-		    ((src[si + 1] << 8) | src[si]);
+		u = be ? ((src[si] << 8) | src[si + 1]) : ((src[si + 1] << 8) | src[si]);
 		if (!u)
 			break;
 		if (u >= 0xD800 && u <= 0xDBFF && si + 3 < slen) {
-			u2 = be ? ((src[si + 2] << 8) | src[si + 3]) :
-			    ((src[si + 3] << 8) | src[si + 2]);
+			u2 = be ? ((src[si + 2] << 8) | src[si + 3]) : ((src[si + 3] << 8) | src[si + 2]);
 			if (u2 >= 0xDC00 && u2 <= 0xDFFF) {
-				u = 0x10000 + (((u - 0xD800) << 10) |
-				    (u2 - 0xDC00));
+				u = 0x10000 + (((u - 0xD800) << 10) | (u2 - 0xDC00));
 				si += 2;
 			}
 		}
@@ -169,8 +160,7 @@ decodeutf16(char *dst, size_t dlen, const unsigned char *src, size_t slen,
 }
 
 static void
-decodetag(char *dst, size_t dlen, const unsigned char *src, size_t slen,
-    int enc)
+decodetag(char *dst, size_t dlen, const unsigned char *src, size_t slen, int enc)
 {
 	switch (enc) {
 	case ENC_LATIN1:
@@ -196,8 +186,7 @@ validid(const unsigned char *p)
 	int i;
 
 	for (i = 0; i < 4; i++) {
-		if ((p[i] < 'A' || p[i] > 'Z') &&
-		    (p[i] < '0' || p[i] > '9'))
+		if ((p[i] < 'A' || p[i] > 'Z') && (p[i] < '0' || p[i] > '9'))
 			return 0;
 	}
 	return 1;
@@ -206,17 +195,13 @@ validid(const unsigned char *p)
 static size_t
 be32(const unsigned char *p)
 {
-	return ((size_t)p[0] << 24) | ((size_t)p[1] << 16) |
-	    ((size_t)p[2] << 8) | p[3];
+	return ((size_t)p[0] << 24) | ((size_t)p[1] << 16) | ((size_t)p[2] << 8) | p[3];
 }
 
 static size_t
 syncsz(const unsigned char *p)
 {
-	return ((size_t)(p[0] & 0x7F) << 21) |
-	    ((size_t)(p[1] & 0x7F) << 14) |
-	    ((size_t)(p[2] & 0x7F) << 7) |
-	    (p[3] & 0x7F);
+	return ((size_t)(p[0] & 0x7F) << 21) | ((size_t)(p[1] & 0x7F) << 14) | ((size_t)(p[2] & 0x7F) << 7) | (p[3] & 0x7F);
 }
 
 static void
@@ -229,11 +214,9 @@ getv1(FILE *f, struct tag *tp)
 	if (fread(v1, 1, sizeof(v1), f) != sizeof(v1) || memcmp(v1, "TAG", 3))
 		return;
 	if (!tp->title[0])
-		decodetag(tp->title, sizeof(tp->title), v1 + 3, 30,
-		    ENC_LATIN1);
+		decodetag(tp->title, sizeof(tp->title), v1 + 3, 30, ENC_LATIN1);
 	if (!tp->artist[0])
-		decodetag(tp->artist, sizeof(tp->artist), v1 + 33, 30,
-		    ENC_LATIN1);
+		decodetag(tp->artist, sizeof(tp->artist), v1 + 33, 30, ENC_LATIN1);
 }
 
 static void
@@ -256,14 +239,12 @@ getv2(FILE *f, struct tag *tp)
 			return;
 		if (ver == 4) {
 			sz = syncsz(buf);
-			if (sz < 4 || sz > tagsz ||
-			    fseek(f, (long)(sz - 4), SEEK_CUR) < 0)
+			if (sz < 4 || sz > tagsz || fseek(f, (long)(sz - 4), SEEK_CUR) < 0)
 				return;
 			pos = sz;
 		} else {
 			sz = be32(buf);
-			if (sz > tagsz - 4 ||
-			    fseek(f, (long)sz, SEEK_CUR) < 0)
+			if (sz > tagsz - 4 || fseek(f, (long)sz, SEEK_CUR) < 0)
 				return;
 			pos = sz + 4;
 		}
@@ -286,11 +267,9 @@ getv2(FILE *f, struct tag *tp)
 		if (dst && sz > 1) {
 			readsz = sz < sizeof(buf) ? sz : sizeof(buf);
 			if (fread(buf, 1, readsz, f) == readsz)
-				decodetag(dst, sizeof(tp->title), buf + 1,
-				    readsz - 1, buf[0]);
+				decodetag(dst, sizeof(tp->title), buf + 1, readsz - 1, buf[0]);
 		}
-		if (sz > readsz &&
-		    fseek(f, (long)(sz - readsz), SEEK_CUR) < 0)
+		if (sz > readsz && fseek(f, (long)(sz - readsz), SEEK_CUR) < 0)
 			break;
 		pos += sz;
 	}
@@ -328,8 +307,7 @@ processfile(const char *path)
 			blen = (size_t)(dot - base);
 		else
 			blen = strlen(base);
-		decodetag(tag.title, sizeof(tag.title),
-		    (const unsigned char *)base, blen, ENC_UTF8);
+		decodetag(tag.title, sizeof(tag.title), (const unsigned char *)base, blen, ENC_UTF8);
 	}
 	if (tag.artist[0])
 		printf("#EXTINF:-1,%s - %s\n%s\n", tag.artist, tag.title, path);
@@ -350,8 +328,7 @@ processstream(FILE *fp)
 	sz = 0;
 	ret = 0;
 	while ((len = getline(&line, &sz, fp)) >= 0) {
-		while (len > 0 &&
-		    (line[len - 1] == '\n' || line[len - 1] == '\r'))
+		while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
 			line[--len] = '\0';
 		if (len > 0 && processfile(line) < 0)
 			ret = -1;
