@@ -1,19 +1,51 @@
 #define _GNU_SOURCE
 
+#include <err.h>
 #include <errno.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define TAGSZ 512
 
-static const char *argv0;
+enum {
+	ENC_LATIN1,
+	ENC_UTF16BOM,
+	ENC_UTF16BE,
+	ENC_UTF8
+};
+
+struct tag {
+	char title[TAGSZ];
+	char artist[TAGSZ];
+};
+
+static void usage(void);
+static void trim(char *s);
+static size_t pututf8(char *dst, size_t dlen, size_t di, unsigned int cp);
+static void decodelatin1(char *dst, size_t dlen, const unsigned char *src,
+    size_t slen);
+static void decodeutf8(char *dst, size_t dlen, const unsigned char *src,
+    size_t slen);
+static void decodeutf16(char *dst, size_t dlen, const unsigned char *src,
+    size_t slen, int enc);
+static void decodetag(char *dst, size_t dlen, const unsigned char *src,
+    size_t slen, int enc);
+static int validid(const unsigned char *p);
+static size_t be32(const unsigned char *p);
+static size_t syncsz(const unsigned char *p);
+static void getv1(FILE *f, struct tag *tp);
+static void getv2(FILE *f, struct tag *tp);
+static void gettags(FILE *f, struct tag *tp);
+static int processfile(const char *path);
+static int processstream(FILE *fp);
 
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [file ...]\n", argv0);
+	fprintf(stderr, "usage: %s [file ...]\n",
+	    program_invocation_short_name);
 	exit(1);
 }
 
@@ -21,21 +53,20 @@ static void
 trim(char *s)
 {
 	char *p, *start;
-	size_t len;
 
 	start = s;
 	while (*start && (unsigned char)*start <= ' ')
 		start++;
-	len = strlen(start);
+	p = start + strlen(start);
+	while (p > start && (unsigned char)*(p - 1) <= ' ')
+		p--;
+	*p = '\0';
 	if (start != s)
-		memmove(s, start, len + 1);
-	p = s + len;
-	while (p > s && (unsigned char)*(p - 1) <= ' ')
-		*--p = '\0';
+		memmove(s, start, (size_t)(p - start + 1));
 }
 
 static size_t
-put_utf8(char *dst, size_t dlen, size_t di, unsigned int cp)
+pututf8(char *dst, size_t dlen, size_t di, unsigned int cp)
 {
 	if (cp < 0x20 || cp == 0x7F)
 		cp = ' ';
@@ -65,18 +96,18 @@ put_utf8(char *dst, size_t dlen, size_t di, unsigned int cp)
 }
 
 static void
-decode_latin1(char *dst, size_t dlen, const unsigned char *src, size_t slen)
+decodelatin1(char *dst, size_t dlen, const unsigned char *src, size_t slen)
 {
 	size_t di, i;
 
 	di = 0;
 	for (i = 0; i < slen && src[i]; i++)
-		di = put_utf8(dst, dlen, di, src[i]);
+		di = pututf8(dst, dlen, di, src[i]);
 	dst[di] = '\0';
 }
 
 static void
-decode_utf8(char *dst, size_t dlen, const unsigned char *src, size_t slen)
+decodeutf8(char *dst, size_t dlen, const unsigned char *src, size_t slen)
 {
 	size_t di, i;
 	unsigned char c;
@@ -98,17 +129,17 @@ decode_utf8(char *dst, size_t dlen, const unsigned char *src, size_t slen)
 }
 
 static void
-decode_utf16(char *dst, size_t dlen, const unsigned char *src, size_t slen,
-	int enc)
+decodeutf16(char *dst, size_t dlen, const unsigned char *src, size_t slen,
+    int enc)
 {
-	int be;
 	size_t di, si;
 	unsigned int u, u2;
+	int be;
 
-	be = (enc == 2);
+	be = (enc == ENC_UTF16BE);
 	di = 0;
 	si = 0;
-	if (enc == 1 && slen >= 2) {
+	if (enc == ENC_UTF16BOM && slen >= 2) {
 		if (src[0] == 0xFE && src[1] == 0xFF) {
 			be = 1;
 			si = 2;
@@ -118,13 +149,13 @@ decode_utf16(char *dst, size_t dlen, const unsigned char *src, size_t slen,
 		}
 	}
 	for (; si + 1 < slen; si += 2) {
-		u = be ? ((src[si] << 8) | src[si + 1])
-		       : ((src[si + 1] << 8) | src[si]);
+		u = be ? ((src[si] << 8) | src[si + 1]) :
+		    ((src[si + 1] << 8) | src[si]);
 		if (!u)
 			break;
 		if (u >= 0xD800 && u <= 0xDBFF && si + 3 < slen) {
-			u2 = be ? ((src[si + 2] << 8) | src[si + 3])
-			        : ((src[si + 3] << 8) | src[si + 2]);
+			u2 = be ? ((src[si + 2] << 8) | src[si + 3]) :
+			    ((src[si + 3] << 8) | src[si + 2]);
 			if (u2 >= 0xDC00 && u2 <= 0xDFFF) {
 				u = 0x10000 + (((u - 0xD800) << 10) |
 				    (u2 - 0xDC00));
@@ -132,41 +163,43 @@ decode_utf16(char *dst, size_t dlen, const unsigned char *src, size_t slen,
 			}
 		}
 		if (u != 0xFEFF)
-			di = put_utf8(dst, dlen, di, u);
+			di = pututf8(dst, dlen, di, u);
 	}
 	dst[di] = '\0';
 }
 
 static void
-decode_tag(char *dst, size_t dlen, const unsigned char *src, size_t slen,
-	int enc)
+decodetag(char *dst, size_t dlen, const unsigned char *src, size_t slen,
+    int enc)
 {
 	switch (enc) {
-	case 0:
-		decode_latin1(dst, dlen, src, slen);
+	case ENC_LATIN1:
+		decodelatin1(dst, dlen, src, slen);
 		break;
-	case 1:
-	case 2:
-		decode_utf16(dst, dlen, src, slen, enc);
+	case ENC_UTF16BOM:
+	case ENC_UTF16BE:
+		decodeutf16(dst, dlen, src, slen, enc);
 		break;
-	case 3:
-		decode_utf8(dst, dlen, src, slen);
+	case ENC_UTF8:
+		decodeutf8(dst, dlen, src, slen);
 		break;
 	default:
+		dst[0] = '\0';
 		break;
 	}
 	trim(dst);
 }
 
 static int
-valid_id(const unsigned char *p)
+validid(const unsigned char *p)
 {
 	int i;
 
-	for (i = 0; i < 4; i++)
-		if (!((p[i] >= 'A' && p[i] <= 'Z') ||
-		      (p[i] >= '0' && p[i] <= '9')))
+	for (i = 0; i < 4; i++) {
+		if ((p[i] < 'A' || p[i] > 'Z') &&
+		    (p[i] < '0' || p[i] > '9'))
 			return 0;
+	}
 	return 1;
 }
 
@@ -174,122 +207,122 @@ static size_t
 be32(const unsigned char *p)
 {
 	return ((size_t)p[0] << 24) | ((size_t)p[1] << 16) |
-	       ((size_t)p[2] << 8) | p[3];
+	    ((size_t)p[2] << 8) | p[3];
 }
 
 static size_t
 syncsz(const unsigned char *p)
 {
 	return ((size_t)(p[0] & 0x7F) << 21) |
-	       ((size_t)(p[1] & 0x7F) << 14) |
-	       ((size_t)(p[2] & 0x7F) << 7) |
-	       (p[3] & 0x7F);
+	    ((size_t)(p[1] & 0x7F) << 14) |
+	    ((size_t)(p[2] & 0x7F) << 7) |
+	    (p[3] & 0x7F);
 }
 
 static void
-get_tags(FILE *f, char *title, size_t tlen, char *artist, size_t alen)
+getv1(FILE *f, struct tag *tp)
 {
-	char *dst;
-	int ver;
-	size_t dlen, pos, read_sz, sz, tag_sz;
-	unsigned char buf[TAGSZ], h[10], v1[128];
+	unsigned char v1[128];
 
-	title[0] = '\0';
-	artist[0] = '\0';
-
-	if (fread(h, 1, sizeof(h), f) == sizeof(h) && !memcmp(h, "ID3", 3)) {
-		ver = h[3];
-		if (ver == 3 || ver == 4) {
-			tag_sz = syncsz(h + 6);
-			pos = 0;
-			if ((h[5] & 0x40) && tag_sz >= 4) {
-				if (fread(buf, 1, 4, f) == 4) {
-					sz = (ver == 4) ? syncsz(buf)
-					                : be32(buf);
-					if (ver == 4 && sz > 4) {
-						if (fseek(f, sz - 4,
-						          SEEK_CUR) < 0)
-							return;
-					} else if (ver == 3) {
-						if (fseek(f, sz,
-						          SEEK_CUR) < 0)
-							return;
-					}
-					pos = (ver == 4) ? sz : sz + 4;
-				}
-			}
-			while (pos + 10 <= tag_sz &&
-			       (!title[0] || !artist[0])) {
-				if (fread(buf, 1, 10, f) != 10)
-					break;
-				if (!valid_id(buf))
-					break;
-				sz = (ver == 4) ? syncsz(buf + 4)
-				                : be32(buf + 4);
-				pos += 10;
-				if (sz > tag_sz - pos)
-					break;
-
-				dst = NULL;
-				dlen = 0;
-				if (!title[0] && !memcmp(buf, "TIT2", 4)) {
-					dst = title;
-					dlen = tlen;
-				} else if (!artist[0] &&
-				           !memcmp(buf, "TPE1", 4)) {
-					dst = artist;
-					dlen = alen;
-				}
-
-				read_sz = 0;
-				if (dst && sz > 1) {
-					read_sz = sz < sizeof(buf)
-					    ? sz : sizeof(buf);
-					if (fread(buf, 1, read_sz, f) ==
-					    read_sz)
-						decode_tag(dst, dlen,
-							buf + 1, read_sz - 1,
-							buf[0]);
-				}
-				if (sz > read_sz &&
-				    fseek(f, sz - read_sz, SEEK_CUR) < 0)
-					break;
-				pos += sz;
-			}
-		}
-	}
-
-	if ((title[0] && artist[0]) || fseek(f, -128, SEEK_END) < 0)
+	if (fseek(f, -128, SEEK_END) < 0)
 		return;
 	if (fread(v1, 1, sizeof(v1), f) != sizeof(v1) || memcmp(v1, "TAG", 3))
 		return;
-	if (!title[0]) {
-		decode_latin1(title, tlen, v1 + 3, 30);
-		trim(title);
+	if (!tp->title[0]) {
+		decodelatin1(tp->title, sizeof(tp->title), v1 + 3, 30);
+		trim(tp->title);
 	}
-	if (!artist[0]) {
-		decode_latin1(artist, alen, v1 + 33, 30);
-		trim(artist);
+	if (!tp->artist[0]) {
+		decodelatin1(tp->artist, sizeof(tp->artist), v1 + 33, 30);
+		trim(tp->artist);
 	}
 }
 
+static void
+getv2(FILE *f, struct tag *tp)
+{
+	char *dst;
+	size_t dlen, pos, readsz, sz, tagsz;
+	int ver;
+	unsigned char buf[TAGSZ], h[10];
+
+	if (fread(h, 1, sizeof(h), f) != sizeof(h) || memcmp(h, "ID3", 3))
+		return;
+	ver = h[3];
+	if (ver != 3 && ver != 4)
+		return;
+	tagsz = syncsz(h + 6);
+	pos = 0;
+	if ((h[5] & 0x40) && tagsz >= 4) {
+		if (fread(buf, 1, 4, f) != 4)
+			return;
+		sz = (ver == 4) ? syncsz(buf) : be32(buf);
+		if (ver == 4 && sz > 4) {
+			if (fseek(f, (long)(sz - 4), SEEK_CUR) < 0)
+				return;
+		} else if (ver == 3) {
+			if (fseek(f, (long)sz, SEEK_CUR) < 0)
+				return;
+		}
+		pos = (ver == 4) ? sz : sz + 4;
+	}
+	while (pos + 10 <= tagsz && (!tp->title[0] || !tp->artist[0])) {
+		if (fread(buf, 1, 10, f) != 10)
+			break;
+		if (!validid(buf))
+			break;
+		sz = (ver == 4) ? syncsz(buf + 4) : be32(buf + 4);
+		pos += 10;
+		if (sz > tagsz - pos)
+			break;
+		dst = NULL;
+		dlen = 0;
+		if (!tp->title[0] && !memcmp(buf, "TIT2", 4)) {
+			dst = tp->title;
+			dlen = sizeof(tp->title);
+		} else if (!tp->artist[0] && !memcmp(buf, "TPE1", 4)) {
+			dst = tp->artist;
+			dlen = sizeof(tp->artist);
+		}
+		readsz = 0;
+		if (dst && sz > 1) {
+			readsz = sz < sizeof(buf) ? sz : sizeof(buf);
+			if (fread(buf, 1, readsz, f) == readsz)
+				decodetag(dst, dlen, buf + 1, readsz - 1,
+				    buf[0]);
+		}
+		if (sz > readsz &&
+		    fseek(f, (long)(sz - readsz), SEEK_CUR) < 0)
+			break;
+		pos += sz;
+	}
+}
+
+static void
+gettags(FILE *f, struct tag *tp)
+{
+	tp->title[0] = '\0';
+	tp->artist[0] = '\0';
+	getv2(f, tp);
+	if (!tp->title[0] || !tp->artist[0])
+		getv1(f, tp);
+}
+
 static int
-process_file(const char *path)
+processfile(const char *path)
 {
 	FILE *f;
-	char artist[TAGSZ], title[TAGSZ];
+	struct tag tag;
 	const char *base, *dot;
 	size_t blen;
 
 	if (!(f = fopen(path, "rbe"))) {
-		fprintf(stderr, "%s: %s: %s\n", argv0, path, strerror(errno));
-		return 1;
+		warn("%s", path);
+		return -1;
 	}
-
-	get_tags(f, title, sizeof(title), artist, sizeof(artist));
+	gettags(f, &tag);
 	fclose(f);
-
-	if (!title[0]) {
+	if (!tag.title[0]) {
 		base = strrchr(path, '/');
 		base = base ? base + 1 : path;
 		dot = strrchr(base, '.');
@@ -297,68 +330,66 @@ process_file(const char *path)
 			blen = (size_t)(dot - base);
 		else
 			blen = strlen(base);
-		decode_utf8(title, sizeof(title),
-			(const unsigned char *)base, blen);
-		trim(title);
+		decodeutf8(tag.title, sizeof(tag.title),
+		    (const unsigned char *)base, blen);
+		trim(tag.title);
 	}
-
-	if (artist[0])
-		printf("#EXTINF:-1,%s - %s\n%s\n", artist, title, path);
+	if (tag.artist[0])
+		printf("#EXTINF:-1,%s - %s\n%s\n", tag.artist, tag.title, path);
 	else
-		printf("#EXTINF:-1,%s\n%s\n", title, path);
-
+		printf("#EXTINF:-1,%s\n%s\n", tag.title, path);
 	return 0;
 }
 
 static int
-process_stream(FILE *fp)
+processstream(FILE *fp)
 {
-	char line[PATH_MAX];
-	int c, status;
-	size_t len;
+	char *line;
+	size_t sz;
+	ssize_t len;
+	int ret;
 
-	status = 0;
-	while (fgets(line, sizeof(line), fp)) {
-		len = strlen(line);
-		if (len > 0 && line[len - 1] != '\n' && !feof(fp)) {
-			while ((c = fgetc(fp)) != EOF && c != '\n')
-				;
-			continue;
-		}
-		line[strcspn(line, "\r\n")] = '\0';
-		if (line[0])
-			status |= process_file(line);
+	line = NULL;
+	sz = 0;
+	ret = 0;
+	while ((len = getline(&line, &sz, fp)) >= 0) {
+		while (len > 0 &&
+		    (line[len - 1] == '\n' || line[len - 1] == '\r'))
+			line[--len] = '\0';
+		if (len > 0 && processfile(line) < 0)
+			ret = -1;
 	}
-	return ferror(fp) ? 1 : status;
+	free(line);
+	if (ferror(fp)) {
+		warn("getline");
+		ret = -1;
+	}
+	return ret;
 }
 
 int
 main(int argc, char *argv[])
 {
-	int status;
+	int ch, ret;
 
-	argv0 = *argv ? *argv : "m3u8gen";
-	for (argv++, argc--; argc > 0 && **argv == '-'; argv++, argc--) {
-		if (!strcmp(*argv, "--")) {
-			argv++;
-			argc--;
-			break;
-		}
-		if (!strcmp(*argv, "-"))
-			break;
+	opterr = 0;
+	while ((ch = getopt(argc, argv, "")) != -1)
 		usage();
-	}
-
+	argc -= optind;
+	argv += optind;
 	puts("#EXTM3U");
 	if (!argc)
-		return process_stream(stdin);
-
-	status = 0;
+		return (processstream(stdin) < 0 || ferror(stdout)) ? 1 : 0;
+	ret = 0;
 	for (; argc > 0; argv++, argc--) {
-		if (!strcmp(*argv, "-"))
-			status |= process_stream(stdin);
-		else
-			status |= process_file(*argv);
+		if (!strcmp(*argv, "-")) {
+			if (processstream(stdin) < 0)
+				ret = 1;
+		} else if (processfile(*argv) < 0) {
+			ret = 1;
+		}
 	}
-	return (ferror(stdout) || status) ? 1 : 0;
+	if (ferror(stdout))
+		ret = 1;
+	return ret;
 }
