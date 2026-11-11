@@ -229,9 +229,11 @@ getv1(FILE *f, struct tag *tp)
 	if (fread(v1, 1, sizeof(v1), f) != sizeof(v1) || memcmp(v1, "TAG", 3))
 		return;
 	if (!tp->title[0])
-		decodetag(tp->title, sizeof(tp->title), v1 + 3, 30, ENC_LATIN1);
+		decodetag(tp->title, sizeof(tp->title), v1 + 3, 30,
+		    ENC_LATIN1);
 	if (!tp->artist[0])
-		decodetag(tp->artist, sizeof(tp->artist), v1 + 33, 30, ENC_LATIN1);
+		decodetag(tp->artist, sizeof(tp->artist), v1 + 33, 30,
+		    ENC_LATIN1);
 }
 
 static void
