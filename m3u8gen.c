@@ -125,12 +125,13 @@ decode_utf16(char *dst, size_t dlen, const unsigned char *src, size_t slen, int 
 		u = be ? ((src[si] << 8) | src[si + 1]) : ((src[si + 1] << 8) | src[si]);
 		if (!u)
 			break;
-		if (u >= 0xD800 && u <= 0xDBFF && si + 3 < slen) {
+		if (u >= 0xD800 && u <= 0xDBFF && si + 3 < slen)
 			u2 = be ? ((src[si + 2] << 8) | src[si + 3]) : ((src[si + 3] << 8) | src[si + 2]);
-			if (u2 >= 0xDC00 && u2 <= 0xDFFF) {
-				u = 0x10000 + (((u - 0xD800) << 10) | (u2 - 0xDC00));
-				si += 2;
-			}
+		else
+			u2 = 0;
+		if (u2 >= 0xDC00 && u2 <= 0xDFFF) {
+			u = 0x10000 + (((u - 0xD800) << 10) | (u2 - 0xDC00));
+			si += 2;
 		}
 		if (u != 0xFEFF)
 			di = put_utf8(dst, dlen, di, u);
@@ -198,20 +199,12 @@ read_v2(FILE *f, struct tag *tp)
 		return;
 	tagsz = sync_sz(h + 6);
 	pos = 0;
-	if ((h[5] & 0x40) && tagsz >= 4) {
-		if (fread(buf, 1, 4, f) != 4)
+	if ((h[5] & 0x40)) {
+		if (tagsz < 4 || fread(buf, 1, 4, f) != 4)
 			return;
-		if (ver == 4) {
-			sz = sync_sz(buf);
-			if (sz < 4 || sz > tagsz || fseek(f, (long)(sz - 4), SEEK_CUR) < 0)
-				return;
-			pos = sz;
-		} else {
-			sz = be32(buf);
-			if (sz > tagsz - 4 || fseek(f, (long)sz, SEEK_CUR) < 0)
-				return;
-			pos = sz + 4;
-		}
+		pos = (ver == 4) ? sync_sz(buf) : (be32(buf) + 4);
+		if (pos < 4 || pos > tagsz || fseek(f, (long)(pos - 4), SEEK_CUR) < 0)
+			return;
 	}
 	while (pos + 10 <= tagsz && (!tp->title[0] || !tp->artist[0])) {
 		if (fread(buf, 1, 10, f) != 10)
@@ -227,12 +220,11 @@ read_v2(FILE *f, struct tag *tp)
 			dst = tp->title;
 		else if (!tp->artist[0] && !memcmp(buf, "TPE1", 4))
 			dst = tp->artist;
-		readsz = 0;
-		if (dst && sz > 1) {
-			readsz = sz < sizeof(buf) ? sz : sizeof(buf);
-			if (fread(buf, 1, readsz, f) == readsz)
-				decode_tag(dst, sizeof(tp->title), buf + 1, readsz - 1, buf[0]);
-		}
+		readsz = (dst && sz > 1) ? (sz < sizeof(buf) ? sz : sizeof(buf)) : 0;
+		if (readsz && fread(buf, 1, readsz, f) != readsz)
+			break;
+		if (readsz)
+			decode_tag(dst, sizeof(tp->title), buf + 1, readsz - 1, buf[0]);
 		if (sz > readsz && fseek(f, (long)(sz - readsz), SEEK_CUR) < 0)
 			break;
 		pos += sz;
@@ -327,7 +319,7 @@ usage(void)
 int
 main(int argc, char *argv[])
 {
-	int ret = 0;
+	int res, ret = 0;
 
 	opterr = 0;
 	while (getopt(argc, argv, "") >= 0)
@@ -338,12 +330,12 @@ main(int argc, char *argv[])
 	if (!argc && process_stream(stdin) < 0)
 		ret = 1;
 	for (; argc > 0; argv++, argc--) {
-		if (!strcmp(*argv, "-")) {
-			if (process_stream(stdin) < 0)
-				ret = 1;
-		} else if (process_file(*argv) < 0) {
+		if (!strcmp(*argv, "-"))
+			res = process_stream(stdin);
+		else
+			res = process_file(*argv);
+		if (res < 0)
 			ret = 1;
-		}
 	}
 	if (ferror(stdout))
 		ret = 1;
