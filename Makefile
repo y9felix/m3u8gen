@@ -1,14 +1,16 @@
 PROG = m3u8gen
+VERSION = 1.0.0
 PREFIX ?= $(HOME)/.local
 
 CC = cc
+CPPFLAGS = -DVERSION=\"$(VERSION)\"
 CFLAGS = -std=c99 -pedantic -Wall -Wextra -Werror -O2
 LDFLAGS = -s
 
 all: $(PROG)
 
 $(PROG): $(PROG).c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LDFLAGS)
 	chmod 755 $@
 
 clean:
